@@ -1,0 +1,17 @@
+#!/bin/sh
+# This script synchronizes electronic library with Android phone
+# It expects that termux sshd is running on the phone and books
+# are in the /storage/emulated/0/Books on the phone and in the 
+# ${HOME}/Books on computer.
+# It also expect that phone is resolved in local DNS and has entry
+# in the computer's .ssh/config. If not so, phone IP and other ssh args
+# should be passed via command line
+# i.e.
+#
+# sync_phone 192.168.8.103 -p 8022
+#
+#set -x
+ADDRESS=${1:-nomu-s10}
+shift
+rsync -e "ssh $*" -vac --no-perms --no-times --exclude .FBReader ${HOME}/Books $ADDRESS:/storage/emulated/0
+
