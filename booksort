@@ -1,0 +1,296 @@
+#!/usr/bin/python3
+# -*- coding: utf-8 -*-
+"""
+Скрипт для сортировки электронных книг
+
+Использование
+
+    %s [--move|-m|--simulate|-s] files...
+
+Скрипт извлекает метаинформацию из электронных книг в формате .fb2,
+.epub, .pdf и .djvu и копирует их в иерархию директорий вида
+А/Автор/Заглоовок в текущей директории.
+
+При формировании имени файла из имени автора и заголовка удаляются
+(заменяются на подчерки) пробелы и символы, не допустимые в именах
+файлов на файловой системе FAT.
+
+Если авторов указано несколько, используется первый по алфавиту.
+Если автора совсем нет, вместо автора используется заголовок.
+
+Для форматов pdf, epub и djvu используется набор эвристик для выделения
+имени и фамилии автора из имени в произвольной форме.
+
+Если на входе был fb2.zip файл, то в целевую директорию помещается
+распакованный fb2
+
+Опции:
+
+--move, -m
+
+     Удалить исходный файл после копирования
+
+--simulate, -s
+
+     Ничего не копировать, просто выдать на экран список исходных и
+     результирующих имен.
+
+--help, -h
+
+     Выдать справку и завершить работу.
+
+"""
+import xml.etree.ElementTree as ET
+import zipfile
+import sys
+import re
+import os
+import os.path
+import shutil
+import getopt
+import subprocess
+NS = {"fb":"http://www.gribuser.ru/xml/fictionbook/2.0",
+      'l':"http://www.w3.org/1999/xlink",
+      "opf":"http://www.idpf.org/2007/opf",
+      'dc':"http://purl.org/dc/elements/1.1/",
+      'DC':"http://purl.org/dc/elements/1.0/",
+      'Dc':"http://purl.org/metadata/dublin_core"}
+def getxml(filename):
+    """
+    Возвращает xml-представление в виде строки байт
+    """
+    if filename.endswith(".fb2"):
+        with open(filename, "rb") as fil:
+            content = fil.read()
+            fil.close()
+            return content
+    elif filename.endswith(".zip"):
+        with zipfile.ZipFile(filename) as zipf:
+            names = [name for name in zipf.namelist() if
+                     name.endswith(".fb2")]
+            if not names:
+                raise ValueError("No fb2 file in %s" % filename)
+            elif len(names) > 1:
+                raise ValueError("Too many fb2 files in %s" % filename)
+            content = zipf.read(names[0])
+        return content
+    else:
+        raise ValueError("Unknown compression suffix %s" % filename)
+
+def transform_author(orig_name):
+    """
+    Преобразует имя автора, написанное в свободной форме в метаданных
+    epub или pdf в имя вида last-name first-name
+    """
+    orig_name = orig_name.strip()
+    print("transform_author(%s)" % orig_name)
+    match = re.match(r"(.\.(?:.\.)?)\s?(\w+)", orig_name)
+    if match:
+        return match.group(2) + " " + match.group(1)
+    match = re.match(r"(\w+)\s+(.\.(?:.\.)?)", orig_name)
+    if match:
+        return match.group(1) + " " + match.group(2)
+    match = re.match(r"(\w+),\s+(\S+)", orig_name)
+    if match:
+        return match.group(1) + " " + match.group(2)
+    name_as_list = orig_name.split(" ")
+    if (len(name_as_list) == 3 and
+            (name_as_list[0][-2:] in ("ов", "ев", "ин", "ко") or
+             name_as_list[0][-3:] in ("ман", "сон", "ерг", "yрг")) and
+            name_as_list[2].endswith("ич")):
+        return name_as_list[1] + " " + name_as_list[0]
+    if len(name_as_list) > 1:
+        return name_as_list[-1] + " " + name_as_list[0]
+    return orig_name
+
+def getepubmeta(filename):
+    """
+    Возвращает метаданные из epub-файла
+    """
+    out = {}
+    with zipfile.ZipFile(filename) as zipf:
+        names = [name for name in zipf.namelist()
+                 if name.endswith(".opf")]
+        if not names:
+            raise ValueError("Cannot find content.opf in %s" % filename)
+        tree = ET.fromstring(zipf.read(names[0]))
+    authors = (tree.findall(".//dc:creator", NS) +
+               tree.findall(".//DC:Creator", NS) +
+               tree.findall(".//Dc:Creator", NS))
+    title = tree.find(".//dc:title", NS)
+    if title is None:
+        title = tree.find(".//DC:Title", NS)
+    if title is None:
+        title = tree.find(".//Dc:Title", NS)
+    if title is None:
+        raise ValueError("No title found in %s" % filename)
+    out["title"] = title.text.strip()
+    out["authors"] = []
+    for author in authors:
+        out["authors"].append(transform_author(author.text))
+    if out["authors"]:
+        out["authors"].sort()
+    else:
+        del out["authors"]
+    out["format"] = ".epub"
+    return out
+
+
+
+def getfb2meta(xmltext):
+    """
+    Возвращает список имен авторов, заглавие, серию и номер в серии
+    как словарь.
+    """
+    out = {}
+    tree = ET.fromstring(xmltext)
+    if not tree.tag.endswith("FictionBook"):
+        raise ValueError("Root element not a Fictionbook but %s" % tree.tag)
+    titleinfo = tree.find("./fb:description/fb:title-info", NS)
+    out["title"] = titleinfo.find("./fb:book-title", NS).text.strip()
+
+    sequence = titleinfo.find("./fb:sequence", NS)
+    if (sequence is not None and 'number' in sequence.attrib and
+            sequence.attrib["number"].isdigit()):
+        out["sequence"] = sequence.attrib["name"].strip()
+        out["seqno"] = sequence.attrib["number"]
+    out["authors"] = []
+    for author in titleinfo.findall("./fb:author", NS):
+        astr = []
+        for part in ("last-name", "first-name"):
+            namepart = author.find("./fb:" + part, NS)
+            if namepart is None:
+                continue
+            if namepart.text is None:
+                continue
+            astr.append(namepart.text.strip())
+        if not astr:
+            continue
+        out["authors"].append(" ".join(astr))
+    if not out["authors"]:
+        del out["authors"]
+    else:
+        out["authors"].sort()
+    out["format"] = ".fb2"
+    return out
+def make_name(meta):
+    """
+    Формирует имя файла из метаинформации.
+    """
+    title = re.sub(r"[ \t:+\*\"'/\?]+", "_", meta['title'])
+    if "authors" in meta:
+        author = re.sub(r"[ \t:+\"'/\?]+", "_", meta['authors'][0])
+        dirname = os.path.join(author[0], author)
+    else:
+        dirname = os.path.join(title[0], title)
+    filename = title + meta["format"]
+    if 'sequence' in meta:
+        dirname += "/" + re.sub(r"[ \t:+\"'/\?]+", "_", meta['sequence'])
+        filename = "%02d.%s" % (int(meta['seqno']), filename)
+    return dirname, filename
+
+def getpdfmeta(filename):
+    """
+    Извлекает метаинформацию из pdf-файла
+    """
+    process = subprocess.run(["pdftk", filename, "dump_data_utf8"],
+                             text=True, capture_output=True, check=True)
+    key = None
+    value = None
+    meta = {}
+    for line in process.stdout.split("\n"):
+        if line.startswith("InfoKey: "):
+            key = line[9:]
+        elif line.startswith("InfoValue: "):
+            value = line[11:]
+        elif line.startswith("InfoBegin"):
+            if key and value:
+                meta[key] = value
+            key = None
+            value = None
+    if key:
+        meta[key] = value
+    out = {}
+    if "Title" not in meta:
+        raise ValueError("Cannot find title in metainfo of %s" % filename)
+    out["title"] = meta["Title"]
+    if "Author" in meta:
+        out["authors"] = [transform_author(x)
+                          for x in meta["Author"].split(",")]
+        out["authors"].sort()
+    out["format"] = ".pdf"
+    return out
+
+def getdjvumeta(filename):
+    """
+    Извлекает метаинформацию из dejavu файлов
+    """
+    process = subprocess.run(["djvused", filename, "-e", "print-meta", "-u"],
+                             text=True, capture_output=True, check=True)
+    meta = {"format":".djvu"}
+    for line in process.stdout.split("\n"):
+        match = re.match(r'(\w+)\s+"([^"]+)"', line)
+        if match:
+            meta[match.group(1)] = match.group(2)
+    if "author" in meta:
+        meta["authors"] = [transform_author(x) for x in
+                           meta["author"].split(",")]
+        del meta["author"]
+    print(repr(meta))
+    return meta
+
+
+FORMATS = {
+    'epub': getepubmeta,
+    'pdf': getpdfmeta,
+    'djvu': getdjvumeta
+}
+def main():
+    """
+    Обрабатывает аргументы командной строки
+    """
+    options, files = getopt.getopt(sys.argv[1:], "msh",
+                                   ["move", "simulate", "help"])
+    options = dict(options)
+    if "--help" in options or "-h" in options or not files:
+        print(__doc__ % sys.argv[0])
+        sys.exit(0)
+    move = "--move" in options or "-m" in options
+    simulate = "--simulate" in options or "-s" in options
+    if move and simulate:
+        print("Options --move and --simulate cannod be used together\n",
+              file=sys.stderr)
+        sys.exit(1)
+    for param in files:
+        try:
+            if param.endswith(".fb2") or param.endswith(".fb2.zip"):
+                data = getxml(param)
+                meta = getfb2meta(data)
+                filedir, filename = make_name(meta)
+                print(param, "=>", filedir + "/" +filename)
+                if not simulate:
+                    os.makedirs(filedir, exist_ok=True)
+                    with open(os.path.join(filedir, filename), "wb") as outfile:
+                        outfile.write(data)
+                        outfile.close()
+            else:
+                ext = param.split(".").pop()
+                if not ext in FORMATS:
+                    raise ValueError("Unknown format %s" % param)
+                meta = FORMATS[ext](param)
+                filedir, filename = make_name(meta)
+                print(param, "=>", filedir + "/" +filename)
+                if not simulate:
+                    os.makedirs(filedir, exist_ok=True)
+                    shutil.copy(param, os.path.join(filedir, filename))
+            if move:
+                os.unlink(param)
+        except Exception as exch: #pylint: disable=broad-except
+            info = sys.exc_info()
+            print("Exception processing %s: %s" % (param, str(exch)))
+            import traceback
+            traceback.print_tb(info[2])
+            sys.exit(1)
+
+if __name__ == "__main__":
+    main()
