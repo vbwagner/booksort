@@ -236,7 +236,6 @@ def getdjvumeta(filename):
         meta["authors"] = [transform_author(x) for x in
                            meta["author"].split(",")]
         del meta["author"]
-    print(repr(meta))
     return meta
 
 
