@@ -22,7 +22,8 @@
 имени и фамилии автора из имени в произвольной форме.
 
 Если на входе был fb2.zip файл, то в целевую директорию помещается
-распакованный fb2
+распакованный fb2, если только в корне библиотеки не присутствует
+файл с именем zip. Если он существует, то fb2-файлы зипуются.
 
 Опции:
 
@@ -55,6 +56,7 @@ NS = {"fb":"http://www.gribuser.ru/xml/fictionbook/2.0",
       'dc':"http://purl.org/dc/elements/1.1/",
       'DC':"http://purl.org/dc/elements/1.0/",
       'Dc':"http://purl.org/metadata/dublin_core"}
+NEED_ZIP = False
 def getxml(filename):
     """
     Возвращает xml-представление в виде строки байт
@@ -177,15 +179,20 @@ def make_name(meta):
     """
     Формирует имя файла из метаинформации.
     """
+    global NEED_ZIP
     title = re.sub(r"[ \t:+\*\"'/\?]+", "_", meta['title'])
     if "authors" in meta:
         author = re.sub(r"[ \t:+\"'/\?]+", "_", meta['authors'][0])
         dirname = os.path.join(author[0], author)
     else:
         dirname = os.path.join(title[0], title)
+    if dirname.endswith("."):
+        dirname = dirname[:-1]
     filename = title + meta["format"]
     if 'sequence' in meta:
         dirname += "/" + re.sub(r"[ \t:+\"'/\?]+", "_", meta['sequence'])
+        if dirname.endswith("."):
+            dirname = dirname[:-1]
         filename = "%02d.%s" % (int(meta['seqno']), filename)
     return dirname, filename
 
@@ -251,6 +258,8 @@ def main():
     options, files = getopt.getopt(sys.argv[1:], "msh",
                                    ["move", "simulate", "help"])
     options = dict(options)
+    global NEED_ZIP
+    NEED_ZIP = os.path.exists("zip")
     if "--help" in options or "-h" in options or not files:
         print(__doc__ % sys.argv[0])
         sys.exit(0)
@@ -269,9 +278,20 @@ def main():
                 print(param, "=>", filedir + "/" +filename)
                 if not simulate:
                     os.makedirs(filedir, exist_ok=True)
-                    with open(os.path.join(filedir, filename), "wb") as outfile:
-                        outfile.write(data)
-                        outfile.close()
+                    if NEED_ZIP:
+                        zipf = zipfile.ZipFile(os.path.join(filedir,
+                                                            filename + ".zip"),
+                                               mode="w",
+                                               compression=zipfile.ZIP_DEFLATED,
+                                               compresslevel=9)
+                        outfile = zipf.open(filename, mode="w")
+                    else:
+                        zipf = None
+                        outfile = open(os.path.join(filedir, filename), "wb")
+                    outfile.write(data)
+                    outfile.close()
+                    if zipf:
+                        zipf.close()
             else:
                 ext = param.split(".").pop()
                 if not ext in FORMATS:
