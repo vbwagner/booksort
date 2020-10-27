@@ -146,8 +146,11 @@ def getfb2meta(xmltext):
     """
     out = {}
     tree = ET.fromstring(xmltext)
-    if not tree.tag.endswith("FictionBook"):
+    root_tag = tree.tag
+    if not root_tag.endswith("FictionBook"):
         raise ValueError("Root element not a Fictionbook but %s" % tree.tag)
+    # Get fb2 namespace 
+    NS={"fb": root_tag[1:len(root_tag)-len("FictionBook")-1]}
     titleinfo = tree.find("./fb:description/fb:title-info", NS)
     out["title"] = titleinfo.find("./fb:book-title", NS).text.strip()
 
