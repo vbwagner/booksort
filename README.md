@@ -25,3 +25,10 @@ find out whether author name is written first-name first or last-name
 first. It is, of course error-prone.
 
 Heuristics are mainly russian-language specific.
+
+stripspace
+----------
+
+There is other script - stripspace, which fixes some common problems
+in the fb2 metainformation. May be I'll either integrate it into
+booksort or extend to more generic metainformation bulk editor.

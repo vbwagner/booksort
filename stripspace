@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""
+This script scans some fb2 metainformation fields and if
+finds spaces at the beginning/end of fields, strips
+them
+"""
+import xml.etree.ElementTree as ET
+from zipfile import ZipFile, ZIP_DEFLATED
+import sys
+
+def process_file(filename):
+    """
+    Handles file reading-writing and zip archives
+    """
+    names = None
+    if filename.endswith(".zip"):
+        zipf = ZipFile(filename)
+        names = [name for name in zipf.namelist() if name.endswith(".fb2")]
+        if not names:
+            raise ValueError("No fb2 file in %s" % filename)
+        elif len(names) > 1:
+            raise ValueError("Too many fb2 files in %s" % filename)
+        fobj = zipf.open(names[0])
+        tree = ET.parse(fobj)
+        fobj.close()
+        zipf.close()
+    elif filename.endswith(".fb2"):
+        tree = ET.parse(filename)
+    else:
+        raise ValueError("Unknown file extension %s" % filename)
+    if process_tree(tree.getroot()):
+        if names:
+            zipf = ZipFile(filename, mode="w",
+                           compression=ZIP_DEFLATED,
+                           compresslevel=9)
+            outfile = zipf.open(names[0], mode='w')
+        else:
+            zipf = None
+            outfile = open(filename, "w")
+        outfile.write('<?xml version="1.0" encoding="utf-8"?>\n')
+        tree.write(outfile, encoding="utf-8")
+        outfile.close()
+        if zipf:
+            zipf.close()
+        return True
+    else:
+        return False
+def process_tree(root):
+    """
+    Handles xml Recieves xml.etree.Element object to modify
+    Returns true if object have been modified.
+    """
+    print(repr(root))
+    nspace = {"fb": root.tag[1:len(root.tag) - len("FictionBook") - 1]}
+    print(repr(nspace))
+    titleinfo = root.find("./fb:description/fb:title-info", nspace)
+    changed = False
+    for tag in  ([titleinfo.find("./fb:book-title", nspace)] +
+                 titleinfo.findall(".//fb:author/*", nspace)):
+        text = tag.text.strip()
+        if text.isupper():
+            text = text.title()
+        if text != tag.text:
+            changed = True
+            tag.text = text
+    for tag in titleinfo.findall(".//fb:sequence", nspace):
+        text = tag.attrib['name'].strip()
+        if text.isupper():
+            text = text.title()
+        if text != tag.attrib('name'):
+            changed = True
+            tag.attrib['name'] = text
+    return changed
+
+for param in sys.argv[1:]:
+    print(param+'\r', file=sys.stderr, end='', flush=True)
+    if process_file(param):
+        print(param)

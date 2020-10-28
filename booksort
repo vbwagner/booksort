@@ -5,11 +5,11 @@
 
 Использование
 
-    %s [--move|-m|--simulate|-s] files...
+    %s [--move|-m|--simulate|-s|--new|-n|--verbose|-v|--help|-h] files...
 
 Скрипт извлекает метаинформацию из электронных книг в формате .fb2,
 .epub, .pdf и .djvu и копирует их в иерархию директорий вида
-А/Автор/Заглоовок в текущей директории.
+А/Автор/Заглоовок или А/Автор/Серия/N.Заголовок текущей директории.
 
 При формировании имени файла из имени автора и заголовка удаляются
 (заменяются на подчерки) пробелы и символы, не допустимые в именах
@@ -21,20 +21,32 @@
 Для форматов pdf, epub и djvu используется набор эвристик для выделения
 имени и фамилии автора из имени в произвольной форме.
 
-Если на входе был fb2.zip файл, то в целевую директорию помещается
-распакованный fb2, если только в корне библиотеки не присутствует
-файл с именем zip. Если он существует, то fb2-файлы зипуются.
+Файлы fb2 и fb2.zip помещаются в целевую библиотеку распакованными,
+если только в корне не присутствует (пустой) файл с именем zip, тогда
+все файлы пакуются, независимо от того были ли они запакованы
+исходно.
 
 Опции:
 
 --move, -m
 
-     Удалить исходный файл после копирования
+     Удалить исходный файл после успешного копирования
+
+--new, -n
+
+    Копировать только новые файлы, т.е. если обнаруживается, что книга
+    с таким заголовком и автором присутствует в библиотеке, то файл
+    пропускается
 
 --simulate, -s
 
      Ничего не копировать, просто выдать на экран список исходных и
      результирующих имен.
+
+--verbose, -v
+
+    В случае ошибки чтения и парсинга файла, выдавать питоновскую stack
+    trace, а не только сообщение.
 
 --help, -h
 
@@ -137,7 +149,46 @@ def getepubmeta(filename):
     out["format"] = ".epub"
     return out
 
+def cleanup(element):
+    """
+    Return element text stripped from whitespace at the ends,
+    with newlines replaced by spaces and triple dots in the
+    beginning converted to unicode '…'
+    """
+    if element is None:
+        return None
+    text = element.text
+    if text is None:
+        return None
+    text = text.strip().replace("\n", " ")
+    if not text:
+        return None
+    if text.startswith("..."):
+        text = "…" + text[3:]
+    return text
+def format_author(author, localns):
+    """
+    Formats content of FictionBook author tag into string
+    using lastname firstaname format or nickname if neither lastname
+    nor firstname is available.
 
+    Returns string or None if this author tag contain no useful info
+    """
+    if author is None:
+        return None
+    astr = []
+    for part in ("last-name", "first-name"):
+        txt = cleanup(author.find("./fb:" + part, localns))
+        if txt is None:
+            continue
+        astr.append(txt)
+    if not astr:
+        txt = cleanup(author.find("./fb:nickname", localns))
+        if txt is not None:
+            astr = [txt]
+    if astr:
+        return " ".join(astr)
+    return None
 
 def getfb2meta(xmltext):
     """
@@ -149,43 +200,42 @@ def getfb2meta(xmltext):
     root_tag = tree.tag
     if not root_tag.endswith("FictionBook"):
         raise ValueError("Root element not a Fictionbook but %s" % tree.tag)
-    # Get fb2 namespace 
-    NS={"fb": root_tag[1:len(root_tag)-len("FictionBook")-1]}
-    titleinfo = tree.find("./fb:description/fb:title-info", NS)
-    out["title"] = titleinfo.find("./fb:book-title", NS).text.strip()
-
-    sequence = titleinfo.find("./fb:sequence", NS)
+    # Get fb2 namespace
+    localns = {"fb": root_tag[1:root_tag.find("}")],
+               'l':"http://www.w3.org/1999/xlink",}
+    titleinfo = tree.find("./fb:description/fb:title-info", localns)
+    out["title"] = cleanup(titleinfo.find("./fb:book-title", localns))
+    sequence = titleinfo.find("./fb:sequence", localns)
     if (sequence is not None and 'number' in sequence.attrib and
             sequence.attrib["number"].isdigit()):
-        out["sequence"] = sequence.attrib["name"].strip()
+        out["sequence"] = sequence.attrib["name"].strip().replace("\n", " ")
         out["seqno"] = sequence.attrib["number"]
     out["authors"] = []
-    for author in titleinfo.findall("./fb:author", NS):
-        astr = []
-        for part in ("last-name", "first-name"):
-            namepart = author.find("./fb:" + part, NS)
-            if namepart is None:
-                continue
-            if namepart.text is None:
-                continue
-            astr.append(namepart.text.strip())
-        if not astr:
-            continue
-        out["authors"].append(" ".join(astr))
+    for author in titleinfo.findall("./fb:author", localns):
+        astr = format_author(author, localns)
+        if astr is not None:
+            out["authors"].append(astr)
     if not out["authors"]:
         del out["authors"]
     else:
         out["authors"].sort()
     out["format"] = ".fb2"
     return out
-def make_name(meta):
+def make_name(meta, needzip=False):
     """
     Формирует имя файла из метаинформации.
     """
-    global NEED_ZIP
+    if not meta['title']:
+        raise ValueError("book has no title")
     title = re.sub(r"[ \t:+\*\"'/\?]+", "_", meta['title'])
+    if not title:
+        raise ValueError("book has no title")
+    if len(title.encode("utf-8")) > 240:
+        raise ValueError("Book title too long for filename")
     if "authors" in meta:
         author = re.sub(r"[ \t:+\"'/\?]+", "_", meta['authors'][0])
+        if len(author.encode("utf-8")) > 250:
+            raise ValueError("Author name too long for directory name")
         dirname = os.path.join(author[0], author)
     else:
         dirname = os.path.join(title[0], title)
@@ -197,6 +247,8 @@ def make_name(meta):
         if dirname.endswith("."):
             dirname = dirname[:-1]
         filename = "%02d.%s" % (int(meta['seqno']), filename)
+    if needzip:
+        filename += ".zip"
     return dirname, filename
 
 def getpdfmeta(filename):
@@ -254,65 +306,84 @@ FORMATS = {
     'pdf': getpdfmeta,
     'djvu': getdjvumeta
 }
+
+def handle_file(infilename, needzip=False, move=False, simulate=False,
+                new=False, verbose=False):
+    """
+    Processes single file. It gets entire command line options array
+    expanded into named parameters, so some args are unused
+    """
+    #pylint: disable=too-many-arguments, unused-argument
+    if infilename.endswith(".fb2") or infilename.endswith(".zip"):
+        data = getxml(infilename)
+        meta = getfb2meta(data)
+        filedir, filename = make_name(meta, needzip)
+        print(infilename, "=>", filedir + "/" +filename)
+        if new and os.path.exists(os.path.join(filedir, filename)):
+            print(infilename, "skipped because target exists")
+            return
+        if simulate:
+            return
+        os.makedirs(filedir, exist_ok=True)
+        if needzip:
+            zipf = zipfile.ZipFile(os.path.join(filedir,
+                                                filename),
+                                   mode="w",
+                                   compression=zipfile.ZIP_DEFLATED,
+                                   compresslevel=9)
+            outfile = zipf.open(filename, mode="w")
+        else:
+            zipf = None
+            outfile = open(os.path.join(filedir, filename), "wb")
+        outfile.write(data)
+        outfile.close()
+        if zipf:
+            zipf.close()
+    else:
+        ext = infilename.split(".").pop()
+        if not ext in FORMATS:
+            raise ValueError("Unknown format %s" % infilename)
+        meta = FORMATS[ext](infilename)
+        filedir, filename = make_name(meta)
+        print(infilename, "=>", filedir + "/" +filename)
+        if new and os.path.exists(os.path.join(filedir, filename)):
+            print(infilename, " skipped because target exists")
+            return
+        if simulate:
+            return
+        os.makedirs(filedir, exist_ok=True)
+        shutil.copy(infilename, os.path.join(filedir, filename))
+    if move:
+        os.unlink(infilename)
+    return
 def main():
     """
     Обрабатывает аргументы командной строки
     """
-    options, files = getopt.getopt(sys.argv[1:], "msh",
-                                   ["move", "simulate", "help"])
+    options, files = getopt.getopt(sys.argv[1:], "msvnh",
+                                   ["move", "simulate", "verbose",
+                                    "new", "help"])
     options = dict(options)
-    global NEED_ZIP
-    NEED_ZIP = os.path.exists("zip")
     if "--help" in options or "-h" in options or not files:
         print(__doc__ % sys.argv[0])
         sys.exit(0)
-    move = "--move" in options or "-m" in options
-    simulate = "--simulate" in options or "-s" in options
-    if move and simulate:
+    opts = {"needzip":os.path.exists("zip")}
+    for opt in ["move", "simulate", "new", "verbose"]:
+        opts[opt] = "--" + opt in options or "-" + opt[0] in options
+    if opts["move"] and opts["simulate"]:
         print("Options --move and --simulate cannod be used together\n",
               file=sys.stderr)
         sys.exit(1)
     for param in files:
         try:
-            if param.endswith(".fb2") or param.endswith(".fb2.zip"):
-                data = getxml(param)
-                meta = getfb2meta(data)
-                filedir, filename = make_name(meta)
-                print(param, "=>", filedir + "/" +filename)
-                if not simulate:
-                    os.makedirs(filedir, exist_ok=True)
-                    if NEED_ZIP:
-                        zipf = zipfile.ZipFile(os.path.join(filedir,
-                                                            filename + ".zip"),
-                                               mode="w",
-                                               compression=zipfile.ZIP_DEFLATED,
-                                               compresslevel=9)
-                        outfile = zipf.open(filename, mode="w")
-                    else:
-                        zipf = None
-                        outfile = open(os.path.join(filedir, filename), "wb")
-                    outfile.write(data)
-                    outfile.close()
-                    if zipf:
-                        zipf.close()
-            else:
-                ext = param.split(".").pop()
-                if not ext in FORMATS:
-                    raise ValueError("Unknown format %s" % param)
-                meta = FORMATS[ext](param)
-                filedir, filename = make_name(meta)
-                print(param, "=>", filedir + "/" +filename)
-                if not simulate:
-                    os.makedirs(filedir, exist_ok=True)
-                    shutil.copy(param, os.path.join(filedir, filename))
-            if move:
-                os.unlink(param)
+            handle_file(param, **opts)
+
         except Exception as exch: #pylint: disable=broad-except
             info = sys.exc_info()
-            print("Exception processing %s: %s" % (param, str(exch)))
-            import traceback
-            traceback.print_tb(info[2])
-            sys.exit(1)
-
+            print("Exception processing %s: %s" % (param, str(exch)),
+                  file=sys.stderr)
+            if opts["verbose"]:
+                import traceback
+                traceback.print_tb(info[2])
 if __name__ == "__main__":
     main()
