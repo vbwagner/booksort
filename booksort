@@ -331,7 +331,8 @@ def handle_file(infilename, needzip=False, move=False, simulate=False,
                                    mode="w",
                                    compression=zipfile.ZIP_DEFLATED,
                                    compresslevel=9)
-            outfile = zipf.open(filename, mode="w")
+            # strip .zip extnesion from archive member                       
+            outfile = zipf.open(filename[:-4], mode="w")
         else:
             zipf = None
             outfile = open(os.path.join(filedir, filename), "wb")
