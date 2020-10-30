@@ -331,7 +331,7 @@ def handle_file(infilename, needzip=False, move=False, simulate=False,
                                    mode="w",
                                    compression=zipfile.ZIP_DEFLATED,
                                    compresslevel=9)
-            # strip .zip extnesion from archive member                       
+            # strip .zip extnesion from archive member
             outfile = zipf.open(filename[:-4], mode="w")
         else:
             zipf = None
@@ -375,6 +375,7 @@ def main():
         print("Options --move and --simulate cannod be used together\n",
               file=sys.stderr)
         sys.exit(1)
+    failures = 0
     for param in files:
         try:
             handle_file(param, **opts)
@@ -386,5 +387,10 @@ def main():
             if opts["verbose"]:
                 import traceback
                 traceback.print_tb(info[2])
+            failures += 1
+    if failures:
+        print("%d file(s) were unparsable" % failures, file=sys.stderr)
+        sys.exit(2)
+
 if __name__ == "__main__":
     main()
