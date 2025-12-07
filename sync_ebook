@@ -1,0 +1,16 @@
+#!/bin/sh
+#
+# This script finds whee PockedBook is mounted and synchronizes
+# {HOME}/Books with it
+#
+
+BOOK="$(echo /media/${USER}/PB*|tr " " '\n'|grep '/PB[0-9]\+[A-Z]\?$'|head -1)"
+if [ -n "$BOOK" ]; then
+echo "Syncing with $(basename "$BOOK")"
+rsync -va --delete --no-perms -@ 1 ${HOME}/Books "$BOOK"
+echo "sync filesysyrm buffers. It may take minutes"
+sync
+echo "sync completed. Reader can be unmounted"
+else
+echo "No connected PockedBook found"
+fi
