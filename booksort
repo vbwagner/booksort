@@ -63,11 +63,14 @@ import shutil
 import getopt
 import subprocess
 NS = {"fb":"http://www.gribuser.ru/xml/fictionbook/2.0",
+      "fb21":"http://www.gribuser.ru/xml/fictionbook/2.1",
+      "genres":"http://www.gribuser.ru/xml/fictionbook/2.1/genres",
       'l':"http://www.w3.org/1999/xlink",
       "opf":"http://www.idpf.org/2007/opf",
       'dc':"http://purl.org/dc/elements/1.1/",
       'DC':"http://purl.org/dc/elements/1.0/",
-      'Dc':"http://purl.org/metadata/dublin_core"}
+      'Dc':"http://purl.org/metadata/dublin_core",
+      'xs':"http://www.w3.org/2001/XMLSchema"}
 NEED_ZIP = False
 def getxml(filename):
     """
