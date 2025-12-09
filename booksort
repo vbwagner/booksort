@@ -53,6 +53,7 @@
      Выдать справку и завершить работу.
 
 """
+# pylint: disable=consider-using-f-string
 import xml.etree.ElementTree as ET
 import zipfile
 import sys
@@ -60,7 +61,7 @@ import re
 import os
 import os.path
 import shutil
-import getopt
+import getopt #pylint: disable=deprecated-module
 import subprocess
 NS = {"fb":"http://www.gribuser.ru/xml/fictionbook/2.0",
       "fb21":"http://www.gribuser.ru/xml/fictionbook/2.1",
@@ -87,7 +88,7 @@ def getxml(filename):
                      name.endswith(".fb2")]
             if not names:
                 raise ValueError("No fb2 file in %s" % filename)
-            elif len(names) > 1:
+            if len(names) > 1:
                 raise ValueError("Too many fb2 files in %s" % filename)
             content = zipf.read(names[0])
         return content
@@ -230,11 +231,19 @@ def make_name(meta, needzip=False):
     """
     if not meta['title']:
         raise ValueError("book has no title")
-    title = re.sub(r"[ \t:+\*\"'/\?]+", "_", meta['title'])
+    title = meta['title']
     if not title:
         raise ValueError("book has no title")
     if len(title.encode("utf-8")) > 240:
-        raise ValueError("Book title too long for filename")
+        for delim in (".","!","(","[",",",":"):
+            stop=title.find(delim)
+            if stop > 0:
+                title=title[0:stop].strip(' ')
+                if len(title.encode("utf-8"))<= 240:
+                    break
+        if len(title.encode("utf-8")) > 240:
+            raise ValueError("Book title too long for filename")
+    title=re.sub(r"[ \t:+\*\"'/\?]+", "_", title)
     if "authors" in meta:
         author = re.sub(r"[ \t:+\"'/\?]+", "_", meta['authors'][0])
         if len(author.encode("utf-8")) > 250:
@@ -334,7 +343,7 @@ def handle_file(infilename, needzip=False, move=False, simulate=False,
                                    mode="w",
                                    compression=zipfile.ZIP_DEFLATED,
                                    compresslevel=9)
-            # strip .zip extnesion from archive member
+            # strip .zip extension from archive member
             outfile = zipf.open(filename[:-4], mode="w")
         else:
             zipf = None
