@@ -1,0 +1,361 @@
+#!/usr/bin/python3
+"""
+This script searches flibusta database for given book and extracts it
+"""
+import sys
+import os
+import os.path
+import zipfile
+import glob
+import optparse # pylint: disable=deprecated-module
+import configparser
+def getconfig(custom_config):
+    """
+    Search for configurtion file if any. If not found, searches or
+    removable media with label LIBRARY
+    """
+    default_path = "/media/" + os.environ["LOGNAME"]+"/LIBRARY"
+    program="MultiLib1.11.20040U"
+    config=configparser.ConfigParser()
+    config["archive"]={"path":default_path+"Flibusta.Net",
+                       "dbdump":default_path+"Flibusta.Net/"+program+".zip",
+                       "dumpprefix":program+"/upload/flibusta/lib."}
+    config["database"]={"driver":"sqlite",
+                     "database":default_path+"/flibusta.db"}
+    config["output"]={"path":"~/Books",
+                      "name":'%A/%a/%s/%N_%n.%t',
+                      "coauthor_links":"no"
+                      }
+    files=[os.path.expanduser("~/.config/flibusta/flibusta.conf")]
+    if custom_config:
+        files.append(custom_config)
+    config.read(files)
+    return config
+
+def connect_db(config):
+    """
+    Connects to database, specified in the configuration file
+
+    Uses config section  "database". Parameter 'driver' is name of
+    database type. If driver == 'pgsql', tries psycopg and psycopg2
+    modules. if driver =='sqlite' uses sqlite3 module. Otherwise
+    expects value of this parameter to be a python module which provides
+    connect functions returning DB-API 2.0 compatible handle.
+
+    All other pararemeters in this section are passed to module connect
+    function as keyword arguments.
+    """
+    modname=config["database"]["driver"]
+    params=dict(config["database"])
+    del params["driver"]
+    if modname=="pgsql":
+        try:
+            module=__import__("psycopg")
+        except ModuleNotFoundError:
+            module=__import__("psycopg2")
+    else:
+        if modname == "sqlite":
+            modname="sqlite3"
+            dbname=os.path.expanduser(config["database"]["database"])
+            if not os.path.isdir(os.path.dirname(dbname)):
+                os.makedirs(os.path.dirname(dbname))
+            config["database"]["database"]=dbname
+        module=__import__(modname)
+    return module.connect(**config["database"])
+
+TABLES=["libavtor","libtranslator","libavtorname","libseq","libseqname",
+        "libgenre","libgenrelist","libfilename","libbook"]
+def initdb(conn):
+    """
+    If database doesn't have neccesary tables, create them
+    """
+    conn.execute("""CREATE TABLE libavtorname (
+        AuthorId integer PRIMARY KEY,
+        FirstName text,
+        MiddleName text,
+        LastName text,
+        NickName text,
+        uid int64 DEFAULT 0 NOT NULL,
+        Email text,
+        Homepage text,
+        Gender character(1) DEFAULT '' NOT NULL,
+        MasterId int64 DEFAULT 0 NOT NULL
+        )""")
+    conn.execute("""CREATE TABLE libbook (
+            BookId integer PRIMARY KEY,
+            FileSize  bigint DEFAULT '0'::numeric NOT NULL,
+            Time timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+            Title text DEFAULT '' NOT NULL,
+            Title1 text NOT NULL,
+            Lang character(3) DEFAULT 'ru' NOT NULL,
+            LangEx integer DEFAULT 0 NOT NULL,
+            SrcLang character(3) DEFAULT '' NOT NULL,
+            FileType character(4) NOT NULL,
+            Encoding text DEFAULT '' NOT NULL,
+            Year integer DEFAULT 0 NOT NULL,
+            Deleted character(1) DEFAULT '0' NOT NULL,
+            Ver text DEFAULT '' NOT NULL,
+            FileAuthor text NOT NULL,
+            N bigint DEFAULT 0 NOT NULL,
+            keywords text NOT NULL,
+            md5 text NOT NULL,
+            Modified timestamp without time zone DEFAULT '2009-11-29 05:00:00'::timestamp without time zone NOT NULL,
+            pmd5 character(32) DEFAULT '' NOT NULL,
+            InfoCode smallint DEFAULT 0 NOT NULL,
+            Pages numeric(10,0) DEFAULT 0 NOT NULL,
+            Chars numeric(10,0) DEFAULT 0 NOT NULL
+        )""")
+    conn.execute("""CREATE TABLE libavtor (
+        BookId integer DEFAULT 0,
+        AuthorId integer DEFAULT 0,
+        Pos smallint DEFAULT 0 NOT NULL,
+        primary key (BookId, AuthorId)
+        )""")
+    conn.execute("""CREATE TABLE public.libfilename (
+            BookId integer PRIMARY KEY,
+            FileName text NOT NULL
+        )""")
+    conn.execute("""CREATE TABLE public.libgenrelist (
+            GenreId integer PRIMARY KEY
+            GenreCode text DEFAULT ''::text UNIQUE NOT NULL,
+            GenreDesc text DEFAULT ''::text NOT NULL,
+            GenreMeta text DEFAULT ''::text NOT NULL
+        )""")
+    conn.execute("""CREATE TABLE public.libgenre (
+            Id integer NOT NULL,
+            BookId integer DEFAULT 0 NOT NULL,
+            GenreId integer DEFAULT NOT NULL,
+            PRIMARY KEY (BookId,GenreId)
+        )""")
+
+    conn.execute("""CREATE TABLE libseqname (
+        SeqId integer primary key,
+        SeqName text DEFAULT ''::text NOT NULL
+        )""")
+
+    conn.execute("""CREATE TABLE libseq (
+        BookId numeric(11,0) NOT NULL,
+        SeqId numeric(11,0) NOT NULL,
+        SeqNumb numeric(11,0) NOT NULL,
+        Level smallint DEFAULT '0'::smallint NOT NULL,
+        Type smallint DEFAULT '0'::smallint NOT NULL
+        primary key (BookId, SeqId)
+        )""")
+    conn.execute("""CREATE TABLE public.libtranslator (
+        BookId integer NOT NULL,
+        TranslatorId integer NOT NULL,
+        Pos smallint DEFAULT '0'  NOT NULL,
+        primary key (BookId,TranslatorId))"""
+    )
+    # foreign keys
+    # indexes
+def cleardb(conn):
+    """
+    Removes all data from the database. It is neccessary 
+    before reloading
+    """
+    if 'sqlite3' in globals():
+        # We expect that only one database handling module ish
+        # Sqlite 3 doesn't have TRUNCATE TABLE operator
+        # but knows how to optimzis delete without where
+        operator="DELETE FROM "
+    else:
+        operator="TRUNCATE TABLE "
+
+    for table in TABLES:
+        conn.execute(operator + table)
+ESCAPES={"\\":"\\","'":"''",'"':'"','0':"","b":"","n":"","r":"","t":"\t",
+"Z":"","%":"%","_":"_"}
+def fix_escapes(line):
+    """
+    Replace MySQL-specific backslash escapes to
+    SQL standard ones
+    """
+    ind=0
+    while ind!=-1:
+        ind=line.find("\\",ind)
+        if ind == -1:
+            break
+        char=line[ind+1]
+        tail=line[ind+2:]
+        line=line[:ind]+ESCAPES.get(char,"")
+        ind=len(line)
+        line+=tail
+
+def loaddb(conn, archive):
+    """
+    Extracts sql dumps from archive  and loads data into database
+
+    """
+    try:
+        bookcount=conn.execute("select count(*) from libbook").fetchone()[0]
+    except Exception: #pylint: disable=broad-exception-caught
+        # We use broad exception because different drivers return
+        # different one when table not found
+        initdb(conn)
+        bookcount=0
+    if bookcount > 0:
+        cleardb(conn)
+    prefix=archive["dumpprefix"]
+    conn.autocommit=True
+    with zipfile.ZipFile(archive["dbdump"]) as zipf:
+        for table in reversed(TABLES):
+            print("Loading table "+table,file=sys.stderr)
+            with zipf.open(prefix+table+".sql") as dumpfile:
+                cursor = conn.cursor()
+                for line in dumpfile:
+                    if line.strip.startswith("INSERT INTO "+table):
+                        # Fix MySQL-specific syntax in string constants
+                        line=fix_escapes(line)
+                        cursor.execute(line.rstrip(";"))
+
+                        cursor.commit()
+
+                cursor.close()
+    print("data loading completed",file=sys.stderr)
+def check_db(conn,conf):
+    """
+    Checks whether database contains same number of books as
+    archive
+    """
+    try:
+        books=conn.execute("select max(BookId) from libbook").fetchone()[0]
+    except Exception: # pylint: disable=broad-exception-caught
+        print("Database is not properly initialized. Execute "+sys.argv[0]+"==rebuild")
+        sys.exit(1)
+    booksarchive=0
+    for file in glob.glob(conf["path"]+"/f.fb2-*-*-.zip"):
+        _,_,finish=os.path.splitext(os.path.basename(file))[0].split("-")
+        booksarchive=max(booksarchive,int(finish))
+    if booksarchive != books:
+        # pylint: disable=consider-using-f-string
+        print("Database doesn't match archive. " +
+              "Archive have %d books and database %d" % (booksarchive, books),
+              file=sys.stderr)
+
+
+def query_books(conn, where, params):
+    """
+    Perform query on books database, returns list of dicts
+    """
+    query = """SELECT libbook.bookid, title, title1, lang, filetype,
+               lastname, firstname, middlename, nickname, seqnumb,seqname
+               FROM libbook NATURAL JOIN libavtor USING bookid NATURAL JOIN
+               libavtorname USING authorid LEFT OUTER JOIN libseq USING bookid
+               NATURAL JOIN libseqname USING seqid WHERE deleted='0' AND"""
+    query += where + " ORDER BY bookid, libavtor.pos"
+    fields = ['bookid','title','title1','lang','filetype','lastname',
+              'firstname','middlename','nickname','seqnum','seqname']
+    cur = conn.cursor()
+    for row in cur.execute(query, params):
+        yield zip(fields,row)
+    cur.close()
+
+def construct_name(book_id, conn, template):
+    """
+    Constructs name of output file based on metainformation 
+    from database. Returns pair of constructed name and file type
+    """
+    template = os.path.expanduser(template)
+    bookinfo = next(query_books(conn, "bookid=?",book_id))
+    return name, bookinfo["filetype"]
+def extract(conn,conf,book_id):
+    """
+    Exracts from archives into output directory described in the config
+    """
+    name, btype = construct_name(book_id, conn,
+            os.path.join(conf["output","dir"],conf["output"]["name"]))
+    for archive in glob.glob(conf["archive"]["path"]+"/*-*-*.zip"):
+        if archive.startswith("d."):
+            continue
+        (ftype,start,finish)=archive[:-4].split("-")
+        if ftype.startswith("f."):
+            ftype=ftype[2:]
+        if start <= book_id <= finish and (
+            ftype == ("fb2" if btype == "fb2" else "usr")):
+            with zipfile.ZipFile(archive) as zipf:
+                directory=os.path.dirname(name)
+                if not os.path.isdir(directory):
+                    os.makedirs(directory)
+                if not os.path.exists(conf["output"]["dir"]+"/zip") or btype != "fb2":
+                    zipf.extract(str(book_id)+"."+btype, path=name)
+                else:
+                    with zipfile.ZipFile(name+".zip", "w") as outfile:
+                        outfile.writestr(name,zipf.read(str(book_id)+".fb2"))
+
+def parse_options():
+    """
+    Parses options and returns dict of options and
+    list of args
+    """
+    parser=optparse.OptionParser(
+        "Usage: %prog [options] or %prog --rebuild or %prog --get numbers..."
+        )
+    parser.add_option("-r", "--rebuild", dest="rebuild", default=False,
+            action="store_true",
+            help="Rebuild the database from dumps in the archive")
+    parser.add_option("-g", "--get", dest="get", default=False,
+            action="store_true",
+            help="Extract files from archve instead of just printing info")
+    parser.add_option("-l", "--list", dest="list", default=None,
+            help="List genres or authors matching arg")
+    parser.add_option("-n", "--name", dest="name", default=None,
+            help="Search given pattern in title or sequence name of book")
+    parser.add_option("-a","--author",dest="author",default=None,
+            help="Search given pattern in the author name. Author should be" +
+            "given as LastName FirstName Midllename separated by spaces")
+    parser.add_option("-t","--title",dest="title",default=None,
+        help="Search only title")
+    parser.add_option("-s","--sequence",dest="sequence",default=None,
+        help="Search given pattern only in sequence name")
+    parser.add_option("-G","--genre",dest="genre",default=None,
+        help="Search for genre")
+    parser.add_option("-x","--exact",dest="exact",default=False,
+        action="store_true",
+        help="Search by exact comparation, not using SQL LIKE operator")
+
+    return parser.parse_args()
+
+def main():
+    """
+    Glue it all together
+    """
+    options, args = parse_options()
+    config=getconfig(options.config)
+    conn=connect_db(config)
+    if options.rebuild:
+        loaddb(conn, config["archive"])
+        return 0
+    check_db(conn, config["archive"])
+    if options.list.startswith('g'):
+        list_genres(conn,args[0])
+        return 0
+    if options.list.startswith('a',options.exact):
+        list_authors(conn,args[0])
+        return 0
+    if options.list:
+        raise ValueError("Invalid value %s for -l option" % options.list)
+    if options.get and args:
+        for book_id in args:
+            extract(conn,config, book_id)
+        return 0
+    where, params = search_query(options)
+
+    seen=set()
+    for book in query_books(conn,where,params):
+        if options.get:
+            if book.bookid not in seen:
+                extract(conn, config, book.bookid)
+        else:
+            display(book, book.bookid not in seen)
+        seen.add(book.bookid)
+    return 0
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e: #pylint: disable=broad-exception-caught
+        if "DEBUG" in os.environ:
+            raise e
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
