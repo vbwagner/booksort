@@ -15,10 +15,10 @@ def getconfig(custom_config):
     removable media with label LIBRARY
     """
     default_path = "/media/" + os.environ["LOGNAME"]+"/LIBRARY"
-    program="MultiLib1.11.20040U"
-    config=configparser.ConfigParser()
-    config["archive"]={"path":default_path+"Flibusta.Net",
-                       "dbdump":default_path+"Flibusta.Net/"+program+".zip",
+    program="MultiLib1.11.200420U"
+    config=configparser.ConfigParser(interpolation=None)
+    config["archive"]={"path":default_path+"/Flibusta.Net",
+                       "dbdump":default_path+"/Flibusta.Net/"+program+".zip",
                        "dumpprefix":program+"/upload/flibusta/lib."}
     config["database"]={"driver":"sqlite",
                      "database":default_path+"/flibusta.db"}
@@ -59,9 +59,9 @@ def connect_db(config):
             dbname=os.path.expanduser(config["database"]["database"])
             if not os.path.isdir(os.path.dirname(dbname)):
                 os.makedirs(os.path.dirname(dbname))
-            config["database"]["database"]=dbname
+            params["database"]=dbname
         module=__import__(modname)
-    return module.connect(**config["database"])
+    return module.connect(**params)
 
 TABLES=["libavtor","libtranslator","libavtorname","libseq","libseqname",
         "libgenre","libgenrelist","libfilename","libbook"]
@@ -83,7 +83,7 @@ def initdb(conn):
         )""")
     conn.execute("""CREATE TABLE libbook (
             BookId integer PRIMARY KEY,
-            FileSize  bigint DEFAULT '0'::numeric NOT NULL,
+            FileSize  bigint DEFAULT 0 NOT NULL,
             Time timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
             Title text DEFAULT '' NOT NULL,
             Title1 text NOT NULL,
@@ -99,7 +99,7 @@ def initdb(conn):
             N bigint DEFAULT 0 NOT NULL,
             keywords text NOT NULL,
             md5 text NOT NULL,
-            Modified timestamp without time zone DEFAULT '2009-11-29 05:00:00'::timestamp without time zone NOT NULL,
+            Modified timestamp without time zone  NOT NULL,
             pmd5 character(32) DEFAULT '' NOT NULL,
             InfoCode smallint DEFAULT 0 NOT NULL,
             Pages numeric(10,0) DEFAULT 0 NOT NULL,
@@ -111,37 +111,37 @@ def initdb(conn):
         Pos smallint DEFAULT 0 NOT NULL,
         primary key (BookId, AuthorId)
         )""")
-    conn.execute("""CREATE TABLE public.libfilename (
+    conn.execute("""CREATE TABLE libfilename (
             BookId integer PRIMARY KEY,
             FileName text NOT NULL
         )""")
-    conn.execute("""CREATE TABLE public.libgenrelist (
-            GenreId integer PRIMARY KEY
-            GenreCode text DEFAULT ''::text UNIQUE NOT NULL,
-            GenreDesc text DEFAULT ''::text NOT NULL,
-            GenreMeta text DEFAULT ''::text NOT NULL
+    conn.execute("""CREATE TABLE libgenrelist (
+            GenreId integer PRIMARY KEY,
+            GenreCode text DEFAULT '' UNIQUE NOT NULL,
+            GenreDesc text DEFAULT '' NOT NULL,
+            GenreMeta text DEFAULT '' NOT NULL
         )""")
-    conn.execute("""CREATE TABLE public.libgenre (
+    conn.execute("""CREATE TABLE libgenre (
             Id integer NOT NULL,
             BookId integer DEFAULT 0 NOT NULL,
-            GenreId integer DEFAULT NOT NULL,
+            GenreId integer DEFAULT 0 NOT NULL,
             PRIMARY KEY (BookId,GenreId)
         )""")
 
     conn.execute("""CREATE TABLE libseqname (
         SeqId integer primary key,
-        SeqName text DEFAULT ''::text NOT NULL
+        SeqName text DEFAULT '' NOT NULL
         )""")
 
     conn.execute("""CREATE TABLE libseq (
         BookId numeric(11,0) NOT NULL,
         SeqId numeric(11,0) NOT NULL,
         SeqNumb numeric(11,0) NOT NULL,
-        Level smallint DEFAULT '0'::smallint NOT NULL,
-        Type smallint DEFAULT '0'::smallint NOT NULL
+        Level smallint DEFAULT '0' NOT NULL,
+        Type smallint DEFAULT '0' NOT NULL,
         primary key (BookId, SeqId)
         )""")
-    conn.execute("""CREATE TABLE public.libtranslator (
+    conn.execute("""CREATE TABLE libtranslator (
         BookId integer NOT NULL,
         TranslatorId integer NOT NULL,
         Pos smallint DEFAULT '0'  NOT NULL,
@@ -154,7 +154,7 @@ def cleardb(conn):
     Removes all data from the database. It is neccessary 
     before reloading
     """
-    if 'sqlite3' in globals():
+    if 'sqlite3' in sys.modules:
         # We expect that only one database handling module ish
         # Sqlite 3 doesn't have TRUNCATE TABLE operator
         # but knows how to optimzis delete without where
@@ -181,6 +181,7 @@ def fix_escapes(line):
         line=line[:ind]+ESCAPES.get(char,"")
         ind=len(line)
         line+=tail
+    return line    
 
 def loaddb(conn, archive):
     """
@@ -204,12 +205,12 @@ def loaddb(conn, archive):
             with zipf.open(prefix+table+".sql") as dumpfile:
                 cursor = conn.cursor()
                 for line in dumpfile:
-                    if line.strip.startswith("INSERT INTO "+table):
+                    line=line.decode('utf-8')
+                    if line.strip().startswith("INSERT INTO "):
                         # Fix MySQL-specific syntax in string constants
                         line=fix_escapes(line)
                         cursor.execute(line.rstrip(";"))
-
-                        cursor.commit()
+                        conn.commit()
 
                 cursor.close()
     print("data loading completed",file=sys.stderr)
@@ -313,7 +314,9 @@ def parse_options():
     parser.add_option("-x","--exact",dest="exact",default=False,
         action="store_true",
         help="Search by exact comparation, not using SQL LIKE operator")
-
+    parser.add_option("-c","--config",dest="config",
+    default=os.path.expanduser("~/.config/fliget.conf"),
+    help="Alternate configuratiion file")
     return parser.parse_args()
 
 def main():
