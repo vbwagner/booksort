@@ -23,7 +23,7 @@ def getconfig(custom_config):
     config["database"]={"driver":"sqlite",
                      "database":default_path+"/flibusta.db"}
     config["output"]={"path":"~/Books",
-                      "name":'%A/%a/%s/%N_%n.%t',
+                      "name":'%A/%l_%n/%s/%N_%t',
                       "coauthor_links":"no"
                       }
     files=[os.path.expanduser("~/.config/flibusta/flibusta.conf")]
@@ -149,6 +149,10 @@ def initdb(conn):
     )
     # foreign keys
     # indexes
+    conn.execute("CREATE INDEX booktitle ON libbook(title)")
+    conn.execute("CREATE INDEX lnindex ON libauthorname(lastname)")
+    conn.execute("CREATE INDEX fnindex ON libauthorname(firstname)")
+    conn.execute("CREATE INDEX seqindex ON libseqname(seqname)")
 def cleardb(conn):
     """
     Removes all data from the database. It is neccessary 
@@ -181,7 +185,7 @@ def fix_escapes(line):
         line=line[:ind]+ESCAPES.get(char,"")
         ind=len(line)
         line+=tail
-    return line    
+    return line
 
 def loaddb(conn, archive):
     """
@@ -225,7 +229,7 @@ def check_db(conn,conf):
         print("Database is not properly initialized. Execute "+sys.argv[0]+"==rebuild")
         sys.exit(1)
     booksarchive=0
-    for file in glob.glob(conf["path"]+"/f.fb2-*-*-.zip"):
+    for file in glob.glob(conf["path"]+"/f.fb2-*-*.zip"):
         _,_,finish=os.path.splitext(os.path.basename(file))[0].split("-")
         booksarchive=max(booksarchive,int(finish))
     if booksarchive != books:
@@ -234,23 +238,91 @@ def check_db(conn,conf):
               "Archive have %d books and database %d" % (booksarchive, books),
               file=sys.stderr)
 
+def display(book,secondary):
+    """
+    Prints information about found book
+    """
+    if secondary:
+        return
+    print("%7d|%-24s|%-40s"%(book["bookid"],
+       book["lastname"]+ (" "+book["firstname"] if book["firstname"] else ""),
+       book["title"]),end="")
+    if book["seqname"]:
+        print("|"+book["seqname"]+" -",book["seqnum"],end="")
+    print("")
 
-def query_books(conn, where, params):
+
+def condition(field,value,exact):
+    """
+    Prepares sql operator with question mark depending
+    on exactnes flag
+    """
+    if exact:
+        return  field + " = " + sqlquote(value)
+    return  field + " like " + sqlquote(value+"%")
+
+def sqlquote(string):
+    """
+    Makes string safe to embed into query
+    """
+    return "'"+string.replace("'","''")+"'"
+
+
+def name2query(name, exact):
+    """
+    Converts author or translator  name to query 
+    Expects up to three space separated fields 
+    lastname firstname middlename
+    """
+    result=[]
+    for field, value in zip(['lastname','firstname','middlename'],
+                            (name.split()+[None,None,None])[:3]):
+        if value is not None:
+            result.append(condition(field,value,exact))
+    return " AND ".join(result)
+def search_query(options):
+    """
+    Convert set of parsed command-line options to SQL expression
+    """
+    conditions=[]
+    if not options.deleted:
+        conditions.append("libbook.deleted = '0'")
+    if options.author:
+        conditions.append(name2query(options.author,options.exact))
+    if options.name:
+        conditions.append("("+condition("title",options.name,options.exact)+
+                          " OR " +
+                          condition("seqname",options.name,options.exact)+")")
+    if options.title:
+        conditions.append(condition("title",options.title, options.exact))
+    if options.sequence:
+        conditions.append(condition("seqname",options.sequence,options.exact))
+    if options.genre:
+        conditions.append("genrecode = " +sqlquote(options.genre))
+    return " AND ".join(conditions)
+def query_books(conn, where):
     """
     Perform query on books database, returns list of dicts
     """
     query = """SELECT libbook.bookid, title, title1, lang, filetype,
                lastname, firstname, middlename, nickname, seqnumb,seqname
-               FROM libbook NATURAL JOIN libavtor USING bookid NATURAL JOIN
-               libavtorname USING authorid LEFT OUTER JOIN libseq USING bookid
-               NATURAL JOIN libseqname USING seqid WHERE deleted='0' AND"""
+               FROM libbook JOIN libavtor USING (bookid) JOIN
+               libavtorname USING (authorid)
+               JOIN libgenre USING (bookid) JOIN libgenrelist USING (genreid)
+               LEFT OUTER JOIN libseq USING (bookid)
+               JOIN libseqname USING (seqid) WHERE """
     query += where + " ORDER BY bookid, libavtor.pos"
     fields = ['bookid','title','title1','lang','filetype','lastname',
               'firstname','middlename','nickname','seqnum','seqname']
+    if "DEBUG" in os.environ:
+        print(query)
     cur = conn.cursor()
-    for row in cur.execute(query, params):
-        yield zip(fields,row)
+    for row in cur.execute(query):
+        yield dict(zip(fields,row))
     cur.close()
+
+FIELDS={'n':'firstname','l':'lastname','m':'middlename','t':'title','A':'A',
+        's':'seqname', 'N':'seqnum','i':'bookid','L':'lang'}
 
 def construct_name(book_id, conn, template):
     """
@@ -258,31 +330,58 @@ def construct_name(book_id, conn, template):
     from database. Returns pair of constructed name and file type
     """
     template = os.path.expanduser(template)
-    bookinfo = next(query_books(conn, "bookid=?",book_id))
-    return name, bookinfo["filetype"]
+    bookinfo = next(query_books(conn, "bookid=%d" % book_id))
+    bookinfo['A']=bookinfo["lastname"][0]
+    ind = 0
+    start=0
+    name=""
+    while ind != -1:
+        print(ind,start)
+        ind=template.find("%",start)
+        if ind == -1:
+            name += template[start:]
+            break
+        name += template[start:ind]
+        key = template[ind+1]
+        if key == "%":
+            name+=key
+        elif key in FIELDS:
+            value = bookinfo[FIELDS[key]]
+            if value is not None:
+                name+=str(value)
+                start=ind+2
+            else:
+                start=ind+3
+        else:
+            raise ValueError("Invalid format specifier "+ key)
+    return name.replace(' ','_'), bookinfo["filetype"]
 def extract(conn,conf,book_id):
     """
     Exracts from archives into output directory described in the config
     """
+    print(repr(book_id),type(book_id))
+    outpath=os.path.expanduser(conf["output"]["path"])
     name, btype = construct_name(book_id, conn,
-            os.path.join(conf["output","dir"],conf["output"]["name"]))
+            os.path.join(outpath,conf["output"]["name"]))
+    if 'DEBUG' in os.environ:
+        print(f"extract {book_id}.{btype} to {name}")
     for archive in glob.glob(conf["archive"]["path"]+"/*-*-*.zip"):
         if archive.startswith("d."):
             continue
-        (ftype,start,finish)=archive[:-4].split("-")
+        (ftype,start,finish)=os.path.basename(archive)[:-4].replace("--","-").split("-")
         if ftype.startswith("f."):
             ftype=ftype[2:]
-        if start <= book_id <= finish and (
+        if int(start) <= book_id <= int(finish) and (
             ftype == ("fb2" if btype == "fb2" else "usr")):
             with zipfile.ZipFile(archive) as zipf:
                 directory=os.path.dirname(name)
                 if not os.path.isdir(directory):
                     os.makedirs(directory)
-                if not os.path.exists(conf["output"]["dir"]+"/zip") or btype != "fb2":
+                if not os.path.exists(outpath+"/zip") or btype != "fb2":
                     zipf.extract(str(book_id)+"."+btype, path=name)
                 else:
-                    with zipfile.ZipFile(name+".zip", "w") as outfile:
-                        outfile.writestr(name,zipf.read(str(book_id)+".fb2"))
+                    with zipfile.ZipFile(name+".fb2.zip", "w") as outfile:
+                        outfile.writestr(name+".fb2",zipf.read(str(book_id)+".fb2"))
 
 def parse_options():
     """
@@ -311,6 +410,9 @@ def parse_options():
         help="Search given pattern only in sequence name")
     parser.add_option("-G","--genre",dest="genre",default=None,
         help="Search for genre")
+    parser.add_option("-d","--deleted",dest="deleted",default=False,
+               action="store_true",
+               help="include deleted books in search results")
     parser.add_option("-x","--exact",dest="exact",default=False,
         action="store_true",
         help="Search by exact comparation, not using SQL LIKE operator")
@@ -318,6 +420,19 @@ def parse_options():
     default=os.path.expanduser("~/.config/fliget.conf"),
     help="Alternate configuratiion file")
     return parser.parse_args()
+
+def list_genres(conn,pattern):
+    """
+    Print list of genres matching pattern
+    """
+    query = "SELECT GenreCode, GenreDesc From libgenrelist"
+    if pattern:
+        query += " WHERE genrecode LIKE "+sqlquote('%'+pattern+'%')
+    if "DEBUG" in os.environ:
+        print(query)
+    cur=conn.execute(query)
+    for code,desc in cur:
+        print("%-24s|%s" % (code,desc))
 
 def main():
     """
@@ -330,28 +445,30 @@ def main():
         loaddb(conn, config["archive"])
         return 0
     check_db(conn, config["archive"])
-    if options.list.startswith('g'):
-        list_genres(conn,args[0])
-        return 0
-    if options.list.startswith('a',options.exact):
-        list_authors(conn,args[0])
-        return 0
     if options.list:
+        if options.list.startswith('g'):
+            list_genres(conn,args[0] if args else None)
+            return 0
+        if options.list.startswith('a'):
+            if not args:
+                raise ValueError("There are to many authors specify search pattern")
+            list_authors(conn,args[0],options.exact)
+            return 0
         raise ValueError("Invalid value %s for -l option" % options.list)
     if options.get and args:
         for book_id in args:
-            extract(conn,config, book_id)
+            extract(conn,config, int(book_id))
         return 0
-    where, params = search_query(options)
+    where = search_query(options)
 
     seen=set()
-    for book in query_books(conn,where,params):
+    for book in query_books(conn,where):
         if options.get:
-            if book.bookid not in seen:
+            if book["bookid"] not in seen:
                 extract(conn, config, book.bookid)
         else:
-            display(book, book.bookid not in seen)
-        seen.add(book.bookid)
+            display(book, book["bookid"] in seen)
+        seen.add(book["bookid"])
     return 0
 
 if __name__ == "__main__":
