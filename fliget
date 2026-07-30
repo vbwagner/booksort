@@ -324,6 +324,8 @@ def query_books(conn, where):
 FIELDS={'n':'firstname','l':'lastname','m':'middlename','t':'title','A':'A',
         's':'seqname', 'N':'seqnum','i':'bookid','L':'lang'}
 
+BADCHARS=str.maketrans("\"':\n\r\t ;","_"*8)
+
 def construct_name(book_id, conn, template):
     """
     Constructs name of output file based on metainformation 
@@ -336,7 +338,6 @@ def construct_name(book_id, conn, template):
     start=0
     name=""
     while ind != -1:
-        print(ind,start)
         ind=template.find("%",start)
         if ind == -1:
             name += template[start:]
@@ -347,19 +348,20 @@ def construct_name(book_id, conn, template):
             name+=key
         elif key in FIELDS:
             value = bookinfo[FIELDS[key]]
-            if value is not None:
-                name+=str(value)
-                start=ind+2
-            else:
-                start=ind+3
+            if value is  None:
+                value=''
+            name+=str(value)
+            start=ind+2
         else:
             raise ValueError("Invalid format specifier "+ key)
-    return name.replace(' ','_'), bookinfo["filetype"]
+    name = name.translate(BADCHARS)
+    while '__' in name:
+        name = name.replace("__","_")
+    return name.replace('/_','/').replace('//','/').replace("/...","/…"), bookinfo["filetype"]
 def extract(conn,conf,book_id):
     """
     Exracts from archives into output directory described in the config
     """
-    print(repr(book_id),type(book_id))
     outpath=os.path.expanduser(conf["output"]["path"])
     name, btype = construct_name(book_id, conn,
             os.path.join(outpath,conf["output"]["name"]))
