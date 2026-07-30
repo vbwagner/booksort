@@ -436,6 +436,17 @@ def list_genres(conn,pattern):
     for code,desc in cur:
         print("%-24s|%s" % (code,desc))
 
+def list_authors(conn,template,exact):
+    """
+    Makes list of authors
+    """
+    query = "SELECT lastname, firstname, middlename, nickname FROM libavtorname WHERE "
+    query += name2query(template,exact)
+    if "DEBUG" in os.environ:
+        print(query)
+    cur=conn.execute(query)
+    for last,first,middle,nick in cur:
+        print(last,first,middle,nick)
 def main():
     """
     Glue it all together
