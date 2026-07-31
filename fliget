@@ -18,7 +18,7 @@ def getconfig(custom_config):
     program="MultiLib1.11.200420U"
     config=configparser.ConfigParser(interpolation=None)
     config["archive"]={"path":default_path+"/Flibusta.Net",
-                       "dbdump":default_path+"/Flibusta.Net/"+program+".zip",
+                       "dbdump":program+".zip",
                        "dumpprefix":program+"/upload/flibusta/lib."}
     config["database"]={"driver":"sqlite",
                      "database":default_path+"/flibusta.db"}
@@ -69,19 +69,20 @@ def initdb(conn):
     """
     If database doesn't have neccesary tables, create them
     """
-    conn.execute("""CREATE TABLE libavtorname (
+    cur=conn.cursor()
+    cur.execute("""CREATE TABLE libavtorname (
         AuthorId integer PRIMARY KEY,
         FirstName text,
         MiddleName text,
         LastName text,
         NickName text,
-        uid int64 DEFAULT 0 NOT NULL,
+        uid bigint DEFAULT 0 NOT NULL,
         Email text,
         Homepage text,
         Gender character(1) DEFAULT '' NOT NULL,
-        MasterId int64 DEFAULT 0 NOT NULL
+        MasterId bigint DEFAULT 0 NOT NULL
         )""")
-    conn.execute("""CREATE TABLE libbook (
+    cur.execute("""CREATE TABLE libbook (
             BookId integer PRIMARY KEY,
             FileSize  bigint DEFAULT 0 NOT NULL,
             Time timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
@@ -105,35 +106,35 @@ def initdb(conn):
             Pages numeric(10,0) DEFAULT 0 NOT NULL,
             Chars numeric(10,0) DEFAULT 0 NOT NULL
         )""")
-    conn.execute("""CREATE TABLE libavtor (
+    cur.execute("""CREATE TABLE libavtor (
         BookId integer DEFAULT 0,
         AuthorId integer DEFAULT 0,
         Pos smallint DEFAULT 0 NOT NULL,
         primary key (BookId, AuthorId)
         )""")
-    conn.execute("""CREATE TABLE libfilename (
+    cur.execute("""CREATE TABLE libfilename (
             BookId integer PRIMARY KEY,
             FileName text NOT NULL
         )""")
-    conn.execute("""CREATE TABLE libgenrelist (
+    cur.execute("""CREATE TABLE libgenrelist (
             GenreId integer PRIMARY KEY,
             GenreCode text DEFAULT '' UNIQUE NOT NULL,
             GenreDesc text DEFAULT '' NOT NULL,
             GenreMeta text DEFAULT '' NOT NULL
         )""")
-    conn.execute("""CREATE TABLE libgenre (
+    cur.execute("""CREATE TABLE libgenre (
             Id integer NOT NULL,
             BookId integer DEFAULT 0 NOT NULL,
             GenreId integer DEFAULT 0 NOT NULL,
             PRIMARY KEY (BookId,GenreId)
         )""")
 
-    conn.execute("""CREATE TABLE libseqname (
+    cur.execute("""CREATE TABLE libseqname (
         SeqId integer primary key,
         SeqName text DEFAULT '' NOT NULL
         )""")
 
-    conn.execute("""CREATE TABLE libseq (
+    cur.execute("""CREATE TABLE libseq (
         BookId numeric(11,0) NOT NULL,
         SeqId numeric(11,0) NOT NULL,
         SeqNumb numeric(11,0) NOT NULL,
@@ -141,7 +142,7 @@ def initdb(conn):
         Type smallint DEFAULT '0' NOT NULL,
         primary key (BookId, SeqId)
         )""")
-    conn.execute("""CREATE TABLE libtranslator (
+    cur.execute("""CREATE TABLE libtranslator (
         BookId integer NOT NULL,
         TranslatorId integer NOT NULL,
         Pos smallint DEFAULT '0'  NOT NULL,
@@ -149,10 +150,11 @@ def initdb(conn):
     )
     # foreign keys
     # indexes
-    conn.execute("CREATE INDEX booktitle ON libbook(title)")
-    conn.execute("CREATE INDEX lnindex ON libauthorname(lastname)")
-    conn.execute("CREATE INDEX fnindex ON libauthorname(firstname)")
-    conn.execute("CREATE INDEX seqindex ON libseqname(seqname)")
+    cur.execute("CREATE INDEX booktitle ON libbook(title)")
+    cur.execute("CREATE INDEX lnindex ON libavtorname(lastname)")
+    cur.execute("CREATE INDEX fnindex ON libavtorname(firstname)")
+    cur.execute("CREATE INDEX seqindex ON libseqname(seqname)")
+    cur.close()
 def cleardb(conn):
     """
     Removes all data from the database. It is neccessary 
@@ -165,9 +167,10 @@ def cleardb(conn):
         operator="DELETE FROM "
     else:
         operator="TRUNCATE TABLE "
-
+    cur=conn.cursor()
     for table in TABLES:
-        conn.execute(operator + table)
+        cur.execute(operator + table)
+    cur.close()    
 ESCAPES={"\\":"\\","'":"''",'"':'"','0':"","b":"","n":"","r":"","t":"\t",
 "Z":"","%":"%","_":"_"}
 def fix_escapes(line):
@@ -192,9 +195,14 @@ def loaddb(conn, archive):
     Extracts sql dumps from archive  and loads data into database
 
     """
+    conn.autocommit=True
     try:
-        bookcount=conn.execute("select count(*) from libbook").fetchone()[0]
-    except Exception: #pylint: disable=broad-exception-caught
+        cur = conn.cursor()
+        cur.execute("select count(*) from libbook")
+        bookcount = cur.fetchone()[0]
+        cur.close()
+    except Exception as exch: #pylint: disable=broad-exception-caught
+        print(repr(exch))
         # We use broad exception because different drivers return
         # different one when table not found
         initdb(conn)
@@ -202,8 +210,7 @@ def loaddb(conn, archive):
     if bookcount > 0:
         cleardb(conn)
     prefix=archive["dumpprefix"]
-    conn.autocommit=True
-    with zipfile.ZipFile(archive["dbdump"]) as zipf:
+    with zipfile.ZipFile(os.path.join(archive["path"],archive["dbdump"])) as zipf:
         for table in reversed(TABLES):
             print("Loading table "+table,file=sys.stderr)
             with zipf.open(prefix+table+".sql") as dumpfile:
@@ -212,7 +219,8 @@ def loaddb(conn, archive):
                     line=line.decode('utf-8')
                     if line.strip().startswith("INSERT INTO "):
                         # Fix MySQL-specific syntax in string constants
-                        line=fix_escapes(line)
+                        line=fix_escapes(line).replace('`','')
+
                         cursor.execute(line.rstrip(";"))
                         conn.commit()
 
@@ -224,7 +232,10 @@ def check_db(conn,conf):
     archive
     """
     try:
-        books=conn.execute("select max(BookId) from libbook").fetchone()[0]
+        cur=conn.cursor()
+        cur.execute("select max(BookId) from libbook")
+        books=cur.fetchone()[0]
+        cur.close()
     except Exception: # pylint: disable=broad-exception-caught
         print("Database is not properly initialized. Execute "+sys.argv[0]+"==rebuild")
         sys.exit(1)
@@ -317,7 +328,8 @@ def query_books(conn, where):
     if "DEBUG" in os.environ:
         print(query)
     cur = conn.cursor()
-    for row in cur.execute(query):
+    cur.execute(query)
+    for row in cur:
         yield dict(zip(fields,row))
     cur.close()
 
@@ -432,9 +444,11 @@ def list_genres(conn,pattern):
         query += " WHERE genrecode LIKE "+sqlquote('%'+pattern+'%')
     if "DEBUG" in os.environ:
         print(query)
-    cur=conn.execute(query)
+    cur=conn.cursor()
+    cur.execute(query)
     for code,desc in cur:
         print("%-24s|%s" % (code,desc))
+    cur.close()
 
 def list_authors(conn,template,exact):
     """
@@ -442,9 +456,11 @@ def list_authors(conn,template,exact):
     """
     query = "SELECT lastname, firstname, middlename, nickname FROM libavtorname WHERE "
     query += name2query(template,exact)
+    query += " ORDER BY lastname, firstname, middlename"
     if "DEBUG" in os.environ:
         print(query)
-    cur=conn.execute(query)
+    cur=conn.cursor()
+    cur.execute(query)
     for last,first,middle,nick in cur:
         print(last,first,middle,nick)
 def main():
