@@ -53,6 +53,8 @@ def connect_db(config):
             module=__import__("psycopg")
         except ModuleNotFoundError:
             module=__import__("psycopg2")
+        if "dbname" in params and "database" in params:
+            del params["database"]
     else:
         if modname == "sqlite":
             modname="sqlite3"
