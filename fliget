@@ -371,7 +371,7 @@ def construct_name(book_id, conn, template):
     name = name.translate(BADCHARS)
     while '__' in name:
         name = name.replace("__","_")
-    return name.replace('/_','/').replace('//','/').replace("/...","/…"), bookinfo["filetype"]
+    return name.replace('/_','/').replace('//','/').replace("/...","/…"), bookinfo["filetype"].rstrip()
 def extract(conn,conf,book_id):
     """
     Exracts from archives into output directory described in the config
@@ -389,6 +389,9 @@ def extract(conn,conf,book_id):
             ftype=ftype[2:]
         if int(start) <= book_id <= int(finish) and (
             ftype == ("fb2" if btype == "fb2" else "usr")):
+            if 'DEBUG' in os.environ:
+                print(f"book_id = '{book_id}'  btype = '{btype}'") 
+                print("Extracting from archive",archive,"file",str(book_id)+"."+btype)
             with zipfile.ZipFile(archive) as zipf:
                 directory=os.path.dirname(name)
                 if not os.path.isdir(directory):
@@ -496,7 +499,7 @@ def main():
     for book in query_books(conn,where):
         if options.get:
             if book["bookid"] not in seen:
-                extract(conn, config, book.bookid)
+                extract(conn, config, book["bookid"])
         else:
             display(book, book["bookid"] in seen)
         seen.add(book["bookid"])
